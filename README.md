@@ -66,4 +66,8 @@ Tests use mocks and do not require a running model. They do not establish live-m
 
 ## Repository scope
 
-This standalone repository includes only application code, documentation, and tests. Business lists, output CSVs, credentials, model files, and saved sessions are excluded. No reuse license has been selected yet.
+This standalone repository includes only application code, documentation, and tests. Business lists, output CSVs, credentials, model files, and saved sessions are excluded.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
