@@ -26,6 +26,8 @@ The expanded contact columns require a **new output filename** for runs started 
 
 ### Context review of names
 
+For email-derived candidates, context review may suggest spacing and capitalization of a merged username: for example, `bradypease510@example.com` may suggest `Brady Pease`. The suggestion must preserve every letter of the original candidate in order. It remains `to_be_confirmed`, never establishes ownership, and retains the original name and email evidence in `contact_candidates` with `name_inference=email_username_model_guess`. If the model is unavailable or cannot suggest a valid interpretation, the original candidate remains available for review. Previously completed rows are not rewritten.
+
 After extraction, candidates (including email-derived guesses) go through a separate call to the selected local model. The call includes the target business, source URL, evidence and surrounding page text. It distinguishes people from organizations, and target-business contacts from reviewers/customers or people associated with another business. Copyright-footer business names are not human contacts. Plausible but uncertain human names remain `to_be_confirmed`; they are not upgraded to verified identities.
 
 The existing `contact_candidates` JSON now records `context_review`, `entity_type`, `relationship` and `context_reason`. Excluded candidates remain there for audit but are removed from the primary name fields. An explicit owner must also pass the target-business/person check. If review fails, candidate names remain with `to_be_confirmed_context_unchecked` and a diagnostic, while ownership is not asserted. This uses the same CSV columns as the preceding contact-name version.
