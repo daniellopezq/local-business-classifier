@@ -46,6 +46,8 @@ Completed rows are flushed to a partial CSV. Session metadata is stored outside 
 
 The optional helper `python resume_latest_session.py` automatically starts the newest unfinished compatible session. Use it only when you intend to resume immediately. Session files reference your data; they are not backups of the original input files. Back up inputs and outputs separately. Older incompatible output schemas require a new output filename.
 
+**Stop** cancels queued work and prevents new page or model requests from starting. Active network requests finish or reach their timeout before shutdown completes. Only consecutive fully completed rows are checkpointed; unfinished work is retried on resume. Closing during a run keeps the window visible with a closing message until the worker has saved and exited. LM Studio remains open separately and may retain its loaded model in GPU memory.
+
 ## Research limitations and privacy
 
 Classification and contact names can be wrong. Possible names inferred from emails or testimonials are not verified owners. Always inspect the evidence and confirmation labels before using results.

@@ -23,7 +23,7 @@ import time
 import tkinter as tk
 import unicodedata
 from collections import deque, OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -1154,6 +1154,11 @@ class LMStudioClient:
     def __init__(self, server_url: str) -> None:
         self.base_url = normalize_server_url(server_url)
         self._inference_lock = threading.Lock()
+        self.stop_event = None
+
+    def _check_cancelled(self):
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise CancelledError('Processing stopped')
 
     def extract_owners(self, pages: list[dict], model: str, business_name: str = '') -> dict:
         return self._contact_json(owner_messages(pages, business_name), model)
@@ -1163,6 +1168,7 @@ class LMStudioClient:
 
     def _contact_json(self, messages: list[dict], model: str) -> dict:
         with self._inference_lock:
+            self._check_cancelled()
             response = _request_json(self.base_url + "/v1/chat/completions", payload={
                 "model": model, "messages": messages, "temperature": 0,
                 "max_tokens": 900, "reasoning_effort": "none", "stream": False,
@@ -1256,6 +1262,7 @@ class LMStudioClient:
                 },
             }
         with self._inference_lock:
+            self._check_cancelled()
             response = _request_json(
                 self.base_url + "/v1/chat/completions", payload=payload, timeout=120
             )
@@ -1538,6 +1545,7 @@ class BusinessClassifierApp:
 
         self.events: queue.Queue[dict] = queue.Queue()
         self.stop_event = threading.Event()
+        self._closing = False
         self.worker: threading.Thread | None = None
         self.session_path: Path | None = None
         self.session_status = ""
@@ -2271,15 +2279,25 @@ class BusinessClassifierApp:
     def _stop_processing(self) -> None:
         self.stop_event.set()
         self.stop_button.configure(state="disabled")
-        self.status_var.set("Stopping after active pipeline work finishes…")
+        self.status_var.set("Stopping: cancelling queued work; waiting for active requests and saving progress…")
+
+    def _check_stopped(self):
+        if getattr(self, 'stop_event', None) is not None and self.stop_event.is_set():
+            raise CancelledError('Processing stopped')
 
     def _classify_row(self, config, row, client):
+        self._check_stopped()
         name = row_value(row, self.headers, config.mapping.business_name)
         if not name:
             return ClassificationResult("review", "Business name is blank.", "low"), []
         try:
-            return client.classify(name, config.target_business, config.model), []
+            result = client.classify(name, config.target_business, config.model)
+            self._check_stopped()
+            return result, []
+        except CancelledError:
+            raise
         except Exception as exc:
+            self._check_stopped()
             return ClassificationResult(
                 "review", "Classification failed; sent to review for safety.", "low"
             ), [f"classification: {exc}"]
@@ -2295,6 +2313,7 @@ class BusinessClassifierApp:
         total: int,
         classification_future: Future | None = None,
     ) -> tuple[dict[str, object], str]:
+        self._check_stopped()
         business_name = row_value(row, self.headers, config.mapping.business_name)
         phone = row_value(row, self.headers, config.mapping.phone)
         street = row_value(row, self.headers, config.mapping.street)
@@ -2315,6 +2334,7 @@ class BusinessClassifierApp:
             classification_future.result() if classification_future is not None
             else self._classify_row(config, row, client)
         )
+        self._check_stopped()
 
         age = {
             "website_checked": "",
@@ -2328,6 +2348,7 @@ class BusinessClassifierApp:
         }
         page_cache = {}
         def cached_fetch(url):
+            self._check_stopped()
             if url not in page_cache:
                 try:
                     page_cache[url] = getattr(self, "_website_fetcher", fetch_html)(url)
@@ -2369,6 +2390,7 @@ class BusinessClassifierApp:
             age["age_status"] = "skipped_rejected"
 
         contacts = empty_contacts()
+        self._check_stopped()
         if config.find_email or config.find_owner:
             if config.skip_rejected_websites and classification.classification == "rejected":
                 contacts = empty_contacts("skipped_rejected")
@@ -2387,6 +2409,7 @@ class BusinessClassifierApp:
                     contacts = empty_contacts("error")
                     contacts["contact_research_error"] = str(exc)[:1000]
 
+        self._check_stopped()
         original: dict[str, object] = {
             header: row[position] if position < len(row) else ""
             for position, header in enumerate(self.headers)
@@ -2420,6 +2443,7 @@ class BusinessClassifierApp:
 
     def _process_rows(self, config: ProcessingConfig) -> None:
         client = LMStudioClient(config.server_url)
+        client.stop_event = self.stop_event
         self._website_fetcher = PageFetchCache(fetch_html)
         partial_path = partial_output_path(config.output_path)
         Path(partial_path).parent.mkdir(parents=True, exist_ok=True)
@@ -2468,6 +2492,19 @@ class BusinessClassifierApp:
                     )
                 )
                 pending: list[tuple[int, Future[tuple[dict[str, object], str]]]] = []
+                classification_futures = []
+                def submit_classification(row):
+                    classification_futures[:] = [f for f in classification_futures if not f.done()]
+                    future = classifier.submit(self._classify_row, config, row, client)
+                    classification_futures.append(future)
+                    return future
+
+                def cancel_queued_work():
+                    for future in classification_futures:
+                        future.cancel()
+                    for _, future in pending:
+                        future.cancel()
+
                 with ThreadPoolExecutor(max_workers=1) as classifier, ThreadPoolExecutor(max_workers=workers) as executor:
                     for _ in range(lookahead):
                         if self.stop_event.is_set():
@@ -2488,14 +2525,31 @@ class BusinessClassifierApp:
                                     source_names if include_source_columns else {},
                                     result_names,
                                     total,
-                                    classifier.submit(self._classify_row, config, row, client),
+                                    submit_classification(row),
                                 ),
                             )
                         )
 
                     while pending:
                         index, future = pending.pop(0)
-                        original, business_name = future.result()
+                        try:
+                            while True:
+                                if self.stop_event.is_set():
+                                    cancel_queued_work()
+                                    future.cancel()
+                                try:
+                                    original, business_name = future.result(timeout=0.1)
+                                    break
+                                except FutureTimeoutError:
+                                    # A task can itself raise TimeoutError; do not retry its failure.
+                                    if future.done():
+                                        original, business_name = future.result()
+                                        break
+                        except CancelledError:
+                            if not self.stop_event.is_set():
+                                raise
+                            cancel_queued_work()
+                            break
                         writer.writerow(original)
                         handle.flush()
                         completed = index
@@ -2528,7 +2582,7 @@ class BusinessClassifierApp:
                                     source_names if include_source_columns else {},
                                     result_names,
                                     total,
-                                    classifier.submit(self._classify_row, config, next_row, client),
+                                    submit_classification(next_row),
                                 ),
                             )
                         )
@@ -2593,6 +2647,8 @@ class BusinessClassifierApp:
         try:
             while True:
                 event = self.events.get_nowait()
+                if getattr(self, '_closing', False):
+                    continue
                 kind = event.get("kind")
                 if kind == "run_started":
                     self._eta_started_at = float(event["started_at"])
@@ -2628,7 +2684,8 @@ class BusinessClassifierApp:
                             total,
                             float(event.get("completed_at") or time.monotonic()),
                         )
-                    self.status_var.set(event["message"])
+                    if not self.stop_event.is_set():
+                        self.status_var.set(event["message"])
                 elif kind == "log":
                     self._write_log(event["message"])
                 elif kind == "complete":
@@ -2676,12 +2733,25 @@ class BusinessClassifierApp:
         self.log.configure(state="disabled")
 
     def _on_close(self) -> None:
+        if getattr(self, '_closing', False):
+            return
         if self.worker and self.worker.is_alive():
             if not messagebox.askyesno(
                 APP_TITLE, "Processing is still running. Stop it and close the application?"
             ):
                 return
-            self.stop_event.set()
+            self._closing = True
+            self._stop_processing()
+            self.start_button.configure(state="disabled")
+            self.status_var.set("Closing: waiting for active requests and saving the resume checkpoint…")
+            self._finish_close()
+            return
+        self.root.destroy()
+
+    def _finish_close(self) -> None:
+        if self.worker and self.worker.is_alive():
+            self.root.after(100, self._finish_close)
+            return
         self.root.destroy()
 
 
