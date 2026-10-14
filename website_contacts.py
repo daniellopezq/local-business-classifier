@@ -76,6 +76,17 @@ def different_business(evidence, business_name, claimed=''):
     return bool(target and other and len(target & other) / min(len(target), len(other)) < .75)
 
 
+def business_email_username(email, business_name):
+    """Recognize multiword business branding without discarding a lone personal name."""
+    local = re.sub(r'[^a-z]', '', email.split('@', 1)[0].split('+', 1)[0].lower())
+    generic = {'the', 'and', 'of', 'llc', 'inc', 'co', 'company', 'services', 'service',
+               'cleaning', 'clean', 'window', 'windows', 'exterior', 'plumbing', 'roofing'}
+    words = list(dict.fromkeys(word for word in re.findall(r'[a-z]+', business_name.lower())
+                               if len(word) >= 3 and word not in generic))
+    # One shared word may be a real personal name, e.g. Jon's Plumbing / jon@...
+    return sum(word in local for word in words) >= 2
+
+
 def quoted_person(item, pages):
     if not isinstance(item, dict):
         return None
@@ -113,7 +124,9 @@ def contact_candidates(payload, pages, business_name=''):
             name = email_name_candidate(email)
             if name:
                 candidates.append({'name': name, 'evidence': email, 'url': page['url'],
-                                   'status': 'to_confirm_email_guess', 'role': 'unknown', 'source': 'email'})
+                                   'status': ('business_email_not_person' if business_email_username(email, business_name)
+                                              else 'to_confirm_email_guess'),
+                                   'role': 'unknown', 'source': 'email'})
     seen, unique = set(), []
     for person in candidates:
         key = (person['name'].casefold(), person['status'], person['evidence'].casefold())
@@ -146,6 +159,11 @@ def context_messages(contexts):
             'add spaces and adjust capitalization to the candidate name; never add, remove, or reorder letters. '
             'For example bradypease510@example.com can suggest Brady Pease, but identity remains unconfirmed. '
             'Use an empty suggested_name if no plausible interpretation exists. '
+            'Business-branded or general inbox usernames are organizations, not human names. '
+            'For example crystalclearoffresno@example.com for Crystal Clear Window Cleaning '
+            'is business branding, not a person named Crystalclearoffresno. '
+            'Use unknown only for a plausible human whose identity is uncertain; do not turn '
+            'a general inquiry inbox into a human contact just because it belongs to the target business. '
             'A company, brand, service, location, or copyright holder organization is NOT a human person. '
             'For example Pure End of Tenancy Cleaning and Vanguard Cleaning Systems of the Southern Valley '
             'in copyright footers are organizations, not contacts. Natalie Cargin, Owner & Founder, '
@@ -203,6 +221,11 @@ def review_candidate_contexts(people, pages, business_name, reviewer):
                 # existing exclusion of a customer or an unrelated business.
                 if decision['entity_type'] == 'organization':
                     person['status'] = 'not_a_person'
+                elif (person['source'] == 'email' and decision['entity_type'] == 'unknown'
+                      and re.search(r'no (?:specific |identifiable )?(?:person|human)|'
+                                    r'(?:general|generic|shared|business|company) (?:inquiry|inbox|email|address)|'
+                                    r'(?:business|company) brand', person['context_reason'], re.I)):
+                    person['status'] = 'business_email_not_person'
                 elif decision['relationship'] == 'customer':
                     person['status'] = 'review_author_not_target'
                 elif decision['relationship'] == 'other_business':

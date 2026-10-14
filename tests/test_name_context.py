@@ -103,6 +103,32 @@ class NameContextTests(unittest.TestCase):
             self.assertFalse(errors)
             self.assertEqual(reviewed[0]['name'], 'Bradypease')
 
+    def test_business_email_is_preserved_without_becoming_a_person(self):
+        for reviewer in (None, Mock(side_effect=TimeoutError('offline')),
+                         Mock(return_value={'decisions': [{'id': 0, 'entity_type': 'person',
+                             'relationship': 'target_business'}]})):
+            with self.subTest(reviewer=reviewer):
+                result = research_contacts(['https://example.com'],
+                    lambda url: ('Contact crystalclearoffresno@example.com', url), app.parse_page,
+                    app._is_directory_url, lambda pages: {'owners': [], 'contacts': []},
+                    True, True, 'Crystal Clear Window Cleaning', reviewer)
+                self.assertEqual(result['email'], 'crystalclearoffresno@example.com')
+                self.assertEqual(result['contact_name'], '')
+                self.assertEqual(result['owner_name'], '')
+                self.assertIn('business_email_not_person', result['contact_candidates'])
+
+    def test_unknown_general_inbox_explanation_excludes_email_guess(self):
+        reviewer = Mock(return_value={'decisions': [{'id': 0, 'entity_type': 'unknown',
+            'relationship': 'target_business',
+            'reason': 'A general inquiry inbox, but no specific person can be identified.'}]})
+        result = research_contacts(['https://example.com'],
+            lambda url: ('Contact brightvalley@example.com', url), app.parse_page,
+            app._is_directory_url, lambda pages: {'owners': [], 'contacts': []},
+            True, True, 'Example Cleaning', reviewer)
+        self.assertEqual(result['contact_name'], '')
+        self.assertEqual(result['email'], 'brightvalley@example.com')
+        self.assertIn('business_email_not_person', result['contact_candidates'])
+
 
 if __name__ == '__main__':
     unittest.main()
